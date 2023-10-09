@@ -24,9 +24,9 @@ use rand::rngs::OsRng;
 use snark_verifier::{
     loader::{
         evm::{self, deploy_and_call, encode_calldata, EvmLoader},
-        native::NativeLoader,
+        native::NativeLoader, halo2::Halo2Loader,
     },
-    pcs::kzg::{Gwc19, KzgAs, LimbsEncoding},
+    pcs::kzg::{Gwc19, KzgAs, LimbsEncoding, KzgAccumulator},
     system::halo2::{compile, transcript::evm::EvmTranscript, Config},
     verifier::{self, SnarkVerifier},
 };
@@ -100,6 +100,9 @@ mod application {
     pub struct StandardPlonk(Fr);
 
     impl StandardPlonk {
+        pub fn default() -> Self{
+            Self(Fr::from(18_u64))
+        }
         pub fn rand<R: RngCore>(mut rng: R) -> Self {
             Self(Fr::from(rng.next_u32() as u64))
         }
@@ -210,6 +213,7 @@ mod aggregation {
         circuit::{builder::BaseCircuitBuilder, BaseCircuitParams, CircuitBuilderStage},
         flex_gate::MultiPhaseThreadBreakPoints,
     };
+    use halo2_base::halo2_proofs::halo2curves::bn256::G1;
     use halo2_ecc::bn254::FpChip;
     use itertools::Itertools;
     use rand::rngs::OsRng;
@@ -238,7 +242,8 @@ mod aggregation {
     type Halo2Loader<'chip> = loader::halo2::Halo2Loader<G1Affine, BaseFieldEccChip<'chip>>;
     pub type PoseidonTranscript<L, S> =
         system::halo2::transcript::halo2::PoseidonTranscript<G1Affine, L, S, T, RATE, R_F, R_P>;
-
+    use crate::Fq;
+    use snark_verifier::loader::EcPointLoader;
     #[derive(Clone)]
     pub struct Snark {
         protocol: PlonkProtocol<G1Affine>,
@@ -290,7 +295,7 @@ mod aggregation {
                 PlonkSuccinctVerifier::verify(svk, &protocol, &instances, &proof).unwrap()
             })
             .collect_vec();
-
+        // print!(" aggregate Halo2: {:?}",accumulators );
         let mut transcript =
             PoseidonTranscript::<Rc<Halo2Loader>, _>::new::<SECURE_MDS>(loader, as_proof);
         let proof = As::read_proof(&Default::default(), &accumulators, &mut transcript).unwrap();
@@ -301,7 +306,11 @@ mod aggregation {
         svk: &Svk,
         loader: &Rc<Halo2Loader<'a>>,
         snarks: &[Snark],
-        kzg_accum: KzgAccumulator<G1Affine,Rc<Halo2Loader<'a>>>,
+        lhs_val:G1Affine,
+        rhs_val: G1Affine,
+        // lhs_loaded: loader::halo2::EcPoint<G1Affine, halo2_ecc::ecc::EccChip<'_, Fr, halo2_ecc::fields::fp::FpChip<'_, Fr, Fq>>> ,
+        // rhs_loaded: loader::halo2::EcPoint<G1Affine, halo2_ecc::ecc::EccChip<'_, Fr, halo2_ecc::fields::fp::FpChip<'_, Fr, Fq>>> ,
+        // kzg_accum: KzgAccumulator<G1Affine,Rc<Halo2Loader<'a>>>,
         as_proof: &[u8],
     ) -> KzgAccumulator<G1Affine, Rc<Halo2Loader<'a>>> {
         let assign_instances = |instances: &[Vec<Fr>]| {
@@ -312,7 +321,9 @@ mod aggregation {
                 })
                 .collect_vec()
         };
-
+        print!("
+        agg check 0
+        ");
         let mut accumulators = snarks
             .iter()
             .flat_map(|snark| {
@@ -326,12 +337,44 @@ mod aggregation {
                 PlonkSuccinctVerifier::verify(svk, &protocol, &instances, &proof).unwrap()
             })
             .collect_vec();
-        accumulators.push(kzg_accum);
+        // let dummy = G1Affine{x:Fq::from_raw([0xfd76e13a1bf58d6b, 0x9b0f12e50bde3df0, 0x545d11910140ec63, 0x0abcd399b149fced]),y:Fq::from_raw([0x49f68f18c5009619, 0x62baf5e9aa799e35, 0x85b6cc47660e7116, 0x2069039e330d1645])};
+        // let dummy2= G1Affine{x:Fq::from_raw([0x04ce5dd47f035132, 0x7c1b3fd43b460519, 0xe7f7bcabdff8cfbb, 0x29ec5109d2ae0200]), y:Fq::from_raw([0xb8ee36b7c0fd1171, 0x0441d1c622550c60, 0xd3f281ccb008aab2, 0x2fed5ef0501f940f])};
 
+        // let lhs_loaded= loader.ec_point_load_const(&lhs_val);
+        // let rhs_loaded = loader.ec_point_load_const(&rhs_val);
+        let lhs_loaded= loader.assign_ec_point(lhs_val);
+        let rhs_loaded = loader.assign_ec_point(rhs_val);
+
+        // print!(" b.25 loader point: {:?} ", lhs_loaded);
+        // print!(" b. 25 loader point 222: {:?} ",rhs_loaded);
+        // print!("
+        
+        // before push: aggregate_kzg
+        
+        // ");
+        accumulators.push(KzgAccumulator { lhs: lhs_loaded, rhs: rhs_loaded });
+
+        // print!("
+        
+        // aggregate check 0.5
+        
+        // ");
         let mut transcript =
             PoseidonTranscript::<Rc<Halo2Loader>, _>::new::<SECURE_MDS>(loader, as_proof);
+        // print!("
+        
+        // aggregate check 0.7
+            
+        //     ");
         let proof = As::read_proof(&Default::default(), &accumulators, &mut transcript).unwrap();
+
+        // print!("
+        
+        // aggregate check 0.8
+            
+        //     ");
         As::verify(&Default::default(), &accumulators, &proof).unwrap()
+      
     }
     #[derive(serde::Serialize, serde::Deserialize, Default)]
     pub struct AggregationConfigParams {
@@ -355,12 +398,15 @@ mod aggregation {
             break_points: Option<MultiPhaseThreadBreakPoints>,
             params_g0: G1Affine,
             snarks: impl IntoIterator<Item = Snark>,
+            lhs_val: G1Affine,
+            rhs_val: G1Affine
+            // kzg_native: KzgAccumulator<G1Affine, NativeLoader>
         ) -> Self {
             let svk: Svk = params_g0.into();
             let snarks = snarks.into_iter().collect_vec();
 
             // verify the snarks natively to get public instances
-            let accumulators = snarks
+            let mut accumulators = snarks
                 .iter()
                 .flat_map(|snark| {
                     let mut transcript = PoseidonTranscript::<NativeLoader, _>::new::<SECURE_MDS>(
@@ -377,7 +423,10 @@ mod aggregation {
                         .unwrap()
                 })
                 .collect_vec();
-
+            print!(" Native accums: {:?} ", accumulators);
+            accumulators.push(KzgAccumulator{lhs:lhs_val, rhs:rhs_val});
+            // accumulators.push(kzg_native);
+             
             let (_accumulator, as_proof) = {
                 let mut transcript =
                     PoseidonTranscript::<NativeLoader, _>::new::<SECURE_MDS>(Vec::new());
@@ -397,11 +446,28 @@ mod aggregation {
             let pool = mem::take(builder.pool(0));
             let loader = Halo2Loader::new(ecc_chip, pool);
 
+            print!("
+            check for halo2 loader
+            ");
+            //  let dummy = G1Affine{x:Fq::from_raw([0xfd76e13a1bf58d6b, 0x9b0f12e50bde3df0, 0x545d11910140ec63, 0x0abcd399b149fced]),y:Fq::from_raw([0x49f68f18c5009619, 0x62baf5e9aa799e35, 0x85b6cc47660e7116, 0x2069039e330d1645])};
+            //  let dummy2= G1Affine{x:Fq::from_raw([0x04ce5dd47f035132, 0x7c1b3fd43b460519, 0xe7f7bcabdff8cfbb, 0x29ec5109d2ae0200]), y:Fq::from_raw([0xb8ee36b7c0fd1171, 0x0441d1c622550c60, 0xd3f281ccb008aab2, 0x2fed5ef0501f940f])};
+            // print!(" loader point: {:?} ", loader.ec_point_load_const(&dummy));
+            // print!(" loader point 222: {:?} ", loader.ec_point_load_const(&dummy2));
             // witness generation
+            // let KzgAccumulator { lhs, rhs } =
+            //     aggregate(&svk, &loader, &snarks, as_proof.as_slice());
+            // let lhs_loaded= loader.ec_point_load_const(&lhs_val);
+            // let rhs_loaded = loader.ec_point_load_const(&rhs_val);
+            // print!(" lhs halo2: {:?} ",lhs_loaded);
+            // print!(" rhs halo2: {:?} ",rhs_loaded);
             let KzgAccumulator { lhs, rhs } =
-                aggregate(&svk, &loader, &snarks, as_proof.as_slice());
+                aggregate_kzg(&svk, &loader, &snarks,lhs_val, rhs_val ,as_proof.as_slice());
+            // print!("check 0.5");
             let lhs = lhs.assigned();
             let rhs = rhs.assigned();
+            // print!(" check 1 ");
+            // let lhs = G1Affine{x:Fq::from_raw([0xfd76e13a1bf58d6b, 0x9b0f12e50bde3df0, 0x545d11910140ec63, 0x0abcd399b149fced]),y:Fq::from_raw([0x49f68f18c5009619, 0x62baf5e9aa799e35, 0x85b6cc47660e7116, 0x2069039e330d1645])};
+            // let rhs= G1Affine{x:Fq::from_raw([0x04ce5dd47f035132, 0x7c1b3fd43b460519, 0xe7f7bcabdff8cfbb, 0x29ec5109d2ae0200]), y:Fq::from_raw([0xb8ee36b7c0fd1171, 0x0441d1c622550c60, 0xd3f281ccb008aab2, 0x2fed5ef0501f940f])};
             let assigned_instances = lhs
                 .x()
                 .limbs()
@@ -412,16 +478,42 @@ mod aggregation {
                 .copied()
                 .collect_vec();
 
-            #[cfg(debug_assertions)]
-            {
+            // #[cfg(debug_assertions)]
+            // {
+                // print!(" check 2 ");
                 let KzgAccumulator { lhs, rhs } = _accumulator;
+                // print!("debug: OG lhs: {:?}",lhs);
+                // let lhs = G1Affine::default();
+                // let KzgAccumulator { lhs, rhs } = KzgAccumulator::new();
+                // let lhs = G1Affine{x:Fq::from_raw([0xfd76e13a1bf58d6b, 0x9b0f12e50bde3df0, 0x545d11910140ec63, 0x0abcd399b149fced]),y:Fq::from_raw([0x49f68f18c5009619, 0x62baf5e9aa799e35, 0x85b6cc47660e7116, 0x2069039e330d1645])};
+                // defg.x = Fq::from_raw([0x0abcd399b149fced, 0x545d11910140ec63, 0x9b0f12e50bde3df0, 0xfd76e13a1bf58d6b]);
+                // defg.x = Fq::from_raw([0xfd76e13a1bf58d6b, 0x9b0f12e50bde3df0, 0x545d11910140ec63, 0x0abcd399b149fced]);
+                // defg.y = Fq::from_raw([0x2069039e330d1645, 0x85b6cc47660e7116, 0x62baf5e9aa799e35, 0x49f68f18c5009619]);
+                // defg.y = Fq::from_raw([0x49f68f18c5009619, 0x62baf5e9aa799e35, 0x85b6cc47660e7116, 0x2069039e330d1645]);
+                // print!(" defffff: {:?}", defg);
+                print!("lhs x : {:?}",lhs.x);
+                print!("lhs y: {:?}",lhs.y);
+
+
+                // let rhs= G1Affine{x:Fq::from_raw([0x04ce5dd47f035132, 0x7c1b3fd43b460519, 0xe7f7bcabdff8cfbb, 0x29ec5109d2ae0200]), y:Fq::from_raw([0xb8ee36b7c0fd1171, 0x0441d1c622550c60, 0xd3f281ccb008aab2, 0x2fed5ef0501f940f])};
+                // rhs.x = Fq::from_raw([0x29ec5109d2ae0200, 0xe7f7bcabdff8cfbb, 0x7c1b3fd43b460519, 0x04ce5dd47f035132]);
+                // rhs.x = Fq::from_raw([0x04ce5dd47f035132, 0x7c1b3fd43b460519, 0xe7f7bcabdff8cfbb, 0x29ec5109d2ae0200]);
+                // rhs.y = Fq::from_raw([0x2fed5ef0501f940f, 0xd3f281ccb008aab2, 0x0441d1c622550c60, 0xb8ee36b7c0fd1171]);
+                // rhs.y = Fq::from_raw([0xb8ee36b7c0fd1171, 0x0441d1c622550c60, 0xd3f281ccb008aab2, 0x2fed5ef0501f940f]);
+                print!("rhs: x: {:?}",rhs.x);
+                print!("rhs: y: {:?}",rhs.y);
                 let instances =
                     [lhs.x, lhs.y, rhs.x, rhs.y].map(fe_to_limbs::<_, Fr, LIMBS, BITS>).concat();
                 for (lhs, rhs) in instances.iter().zip(assigned_instances.iter()) {
+                    // print!("debug: lhs: {:?}",lhs);
+                    // print!("debug: rhs: {:?}",rhs);
+                    // print!("comp lhs: {:?}", lhs);
+                    // print!("comp rhs: {:?}", rhs.value());
                     assert_eq!(lhs, rhs.value());
+                    print!("Debug assert True!");
                 }
-            }
-
+            // }
+            // print!(" check 3 ");
             *builder.pool(0) = loader.take_ctx();
             builder.assigned_instances[0] = assigned_instances;
             if let Some(break_points) = break_points {
@@ -502,8 +594,11 @@ fn gen_proof<
 }
 
 fn gen_application_snark(params: &ParamsKZG<Bn256>) -> aggregation::Snark {
+
+    // let circuit = application::StandardPlonk::default();
     let circuit = application::StandardPlonk::rand(OsRng);
 
+    
     let pk = gen_pk(params, &circuit);
     let protocol = compile(
         params,
@@ -552,7 +647,62 @@ fn evm_verify(deployment_code: Vec<u8>, instances: Vec<Vec<Fr>>, proof: Vec<u8>)
     dbg!(gas_cost);
 }
 
+// copied from kzg.rs from Han's repo
+
+// use crate::{
+//     pcs::{univariate::kzg::UnivariateKzg, Evaluation, PolynomialCommitmentScheme},
+//     util::{
+//         chain,
+//         transcript::{
+//             FieldTranscript, FieldTranscriptRead, FieldTranscriptWrite, InMemoryTranscript,
+//             Keccak256Transcript,
+//         },
+//         Itertools,
+//     },
+// };
+
+// type Pcs = UnivariateKzg<Bn256>;
+// type Polynomial = <Pcs as PolynomialCommitmentScheme<Fr>>::Polynomial;
+use snark_verifier::loader::EcPointLoader;
 fn main() {
+    
+
+    // Native Kzg from Han's repo ==> for now we just directly use their lhs, rhs to focus more on rlc process itself.
+
+        // for k in 3..16 {
+        //     // Setup
+        //     let (pp, vp) = {
+        //         let mut rng = OsRng;
+        //         let poly_size = 1 << k;
+        //         let param = Pcs::setup(poly_size, 1, &mut rng).unwrap();
+        //         Pcs::trim(&param, poly_size, 1).unwrap()
+        //     };
+        //     // Commit and open
+        //     let proof = {
+        //         let mut transcript = Keccak256Transcript::default();
+        //         let poly = Polynomial::rand(pp.degree(), OsRng);
+        //         let comm = Pcs::commit_and_write(&pp, &poly, &mut transcript).unwrap();
+        //         let point = transcript.squeeze_challenge();
+        //         let eval = poly.evaluate(&point);
+        //         transcript.write_field_element(&eval).unwrap();
+        //         Pcs::open(&pp, &poly, &comm, &point, &eval, &mut transcript).unwrap();
+        //         transcript.into_proof()
+        //     };
+        //     // Verify
+        //     let result = {
+        //         let mut transcript = Keccak256Transcript::from_proof((), proof.as_slice());
+        //         Pcs::verify(
+        //             &vp,
+        //             &Pcs::read_commitment(&vp, &mut transcript).unwrap(),
+        //             &transcript.squeeze_challenge(),
+        //             &transcript.read_field_element().unwrap(),
+        //             &mut transcript,
+        //         )
+        //     };
+        //     assert_eq!(result, Ok(()));
+        // }
+
+    // ================================== originial main ===============================================
     let params_app = gen_srs(8);
 
     // just put as 1 plonk protocol
@@ -575,12 +725,18 @@ fn main() {
         lookup_bits: Some(agg_config.lookup_bits),
         num_instance_columns: 1,
     };
+    let lhs_val = G1Affine{x:Fq::from_raw([0xfd76e13a1bf58d6b, 0x9b0f12e50bde3df0, 0x545d11910140ec63, 0x0abcd399b149fced]),y:Fq::from_raw([0x49f68f18c5009619, 0x62baf5e9aa799e35, 0x85b6cc47660e7116, 0x2069039e330d1645])};
+    let rhs_val= G1Affine{x:Fq::from_raw([0x04ce5dd47f035132, 0x7c1b3fd43b460519, 0xe7f7bcabdff8cfbb, 0x29ec5109d2ae0200]), y:Fq::from_raw([0xb8ee36b7c0fd1171, 0x0441d1c622550c60, 0xd3f281ccb008aab2, 0x2fed5ef0501f940f])};
+    // let native_loader = NativeLoader;
+    // print!(" check from value: {:?} ",native_loader.ec_point_load_const(&lhs_val));
     let mut agg_circuit = AggregationCircuit::new(
         CircuitBuilderStage::Mock,
         circuit_params,
         None,
         params_app.get_g()[0],
         snarks.clone(),
+        lhs_val.clone(),
+        rhs_val.clone()
     );
     circuit_params = agg_circuit.inner.calculate_params(Some(9));
     #[cfg(debug_assertions)]
@@ -590,6 +746,8 @@ fn main() {
             .assert_satisfied();
         println!("mock prover passed");
     
+
+    // ================================== originial main end ===============================================
 
     // let params = gen_srs(agg_config.degree);
     // let pk = gen_pk(&params, &agg_circuit.inner);
